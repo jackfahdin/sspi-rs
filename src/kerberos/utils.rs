@@ -15,13 +15,13 @@ pub(super) fn serialize_message<T: ?Sized + Serialize>(v: &T) -> Result<Vec<u8>>
 
     picky_asn1_der::to_writer(v, &mut data)?;
 
-    let len = data.len() as u32 - 4;
+    let len = u32::try_from(data.len())? - 4;
     data[0..4].copy_from_slice(&len.to_be_bytes());
 
     Ok(data)
 }
 
-pub(super) fn validate_mic_token(
+pub(crate) fn validate_mic_token(
     is_client: bool,
     expected_seq_number: u64,
     raw_token: &[u8],
@@ -84,7 +84,10 @@ pub(super) fn validate_mic_token(
         key.as_ref(),
         key_usage,
         &payload,
-        &params.aes_size().unwrap_or(AesSize::Aes256),
+        &params
+            .active_key_aes_size()
+            .or_else(|| params.aes_size())
+            .unwrap_or(AesSize::Aes256),
     )?;
 
     if checksum != token.checksum {
@@ -94,11 +97,12 @@ pub(super) fn validate_mic_token(
     Ok(())
 }
 
-pub(super) fn generate_mic_token(
+pub(crate) fn generate_mic_token(
     is_client: bool,
     seq_number: u64,
     mut payload: Vec<u8>,
     session_key: &Secret<Vec<u8>>,
+    aes_size: &AesSize,
 ) -> Result<Vec<u8>> {
     let (mic_token, key_usage) = if is_client {
         (MicToken::with_initiator_flags(), INITIATOR_SIGN)
@@ -110,12 +114,7 @@ pub(super) fn generate_mic_token(
 
     payload.extend_from_slice(&mic_token.header());
 
-    mic_token.set_checksum(checksum_sha_aes(
-        session_key.as_ref(),
-        key_usage,
-        &payload,
-        &AesSize::Aes256,
-    )?);
+    mic_token.set_checksum(checksum_sha_aes(session_key.as_ref(), key_usage, &payload, aes_size)?);
 
     let mut mic_token_raw = Vec::new();
     mic_token.encode(&mut mic_token_raw)?;

@@ -1,6 +1,8 @@
+use std::ptr;
 use std::slice::{from_raw_parts, from_raw_parts_mut};
 
-use libc::{c_ulonglong, c_void};
+use ffi_types::sspi::{PTimeStamp, SecurityStatus};
+use libc::c_void;
 use num_traits::cast::{FromPrimitive, ToPrimitive};
 use sspi::{
     BufferType, DataRepresentation, DecryptionFlags, EncryptionFlags, Error, ErrorKind, SecurityBuffer,
@@ -14,7 +16,6 @@ use super::sec_buffer::{
     PSecBuffer, PSecBufferDesc, SecBuffer, copy_to_c_sec_buffer, p_sec_buffers_to_security_buffers,
 };
 use super::sec_handle::{CredentialsHandle, PCredHandle, PCtxtHandle, p_ctxt_handle_to_sspi_context};
-use super::sspi_data_types::{PTimeStamp, SecurityStatus};
 use super::utils::transform_credentials_handle;
 use crate::sspi::sec_handle::SspiHandle;
 use crate::utils::into_raw_ptr;
@@ -35,7 +36,9 @@ pub unsafe extern "system" fn FreeCredentialsHandle(ph_credential: PCredHandle) 
     // SAFETY:
     // - `ph_credentials` is guaranteed to be non-null due to the prior check.
     // - `ph_credentials` points to a valid `credentials handle` allocated by the `AcquireCredentialsHandleA/W` function.
-    let cred_handle = unsafe { (*ph_credential).dw_lower as *mut CredentialsHandle };
+    let dw_lower = unsafe { (*ph_credential).dw_lower };
+    let addr = try_execute!(usize::try_from(dw_lower), ErrorKind::InvalidHandle);
+    let cred_handle: *mut CredentialsHandle = ptr::with_exposed_provenance_mut(addr);
     check_null!(cred_handle);
 
     // SAFETY:
@@ -46,8 +49,6 @@ pub unsafe extern "system" fn FreeCredentialsHandle(ph_credential: PCredHandle) 
 
     0
 }
-
-pub type FreeCredentialsHandleFn = unsafe extern "system" fn(PCredHandle) -> SecurityStatus;
 
 /// The `AcceptSecurityContext` function lets the server component of a transport application
 /// establish a security context between the server and a remote client.
@@ -94,7 +95,9 @@ pub unsafe extern "system" fn AcceptSecurityContext(
         // SAFETY:
         // - `ph_credentials` is guaranteed to be non-null due to the prior check.
         // - `ph_credentials` points to a valid `credentials handle` allocated by an SSPI function.
-        let credentials_handle = unsafe { (*ph_credential).dw_lower as *mut CredentialsHandle };
+        let dw_lower = unsafe { (*ph_credential).dw_lower };
+        let addr = try_execute!(usize::try_from(dw_lower), ErrorKind::InvalidHandle);
+        let credentials_handle: *mut CredentialsHandle = ptr::with_exposed_provenance_mut(addr);
 
         // SAFETY: `credentials_handle` is either null or a valid pointer to the `CredentialsHandle` allocated by an SSPI function.
         let transformed_credentials_handle = unsafe { transform_credentials_handle(credentials_handle) };
@@ -133,16 +136,15 @@ pub unsafe extern "system" fn AcceptSecurityContext(
                 // - `p_input` points to a valid `SecBufferDesc` structure.
                 let c_buffers = unsafe { (*p_input).c_buffers };
 
+                let c_buffers_usize = try_execute!(c_buffers.try_into(), ErrorKind::InvalidParameter);
                 // SAFETY:
                 // - `p_buffers` is guaranteed to be non-null due to the prior check.
                 // - The memory region `p_buffers` points to is valid for reads of `c_buffers` element.
-                let raw_buffers = unsafe {
-                    from_raw_parts(p_buffers, c_buffers as usize)
-                };
+                let raw_buffers = unsafe { from_raw_parts(p_buffers, c_buffers_usize) };
                 // SAFETY:
                 // - `raw_buffers` array contains valid `SecBuffer` structures.
                 // - Each `SecBuffer` have a valid `pv_buffer` pointer that is valid for reads of `cb_buffer` bytes.
-                Ok(unsafe { p_sec_buffers_to_security_buffers(raw_buffers) })
+                unsafe { p_sec_buffers_to_security_buffers(raw_buffers) }
             });
 
         let mut output_tokens = vec![SecurityBuffer::new(Vec::with_capacity(1024), BufferType::Token)];
@@ -172,8 +174,13 @@ pub unsafe extern "system" fn AcceptSecurityContext(
         // SAFETY: `ph_new_context` is convertible to a reference.
         let ph_new_context = unsafe { ph_new_context.as_mut() }.expect("ph_new_context is non-null");
 
-        ph_new_context.dw_lower = sspi_context_ptr.as_ptr() as c_ulonglong;
-        ph_new_context.dw_upper = into_raw_ptr(security_package_name.to_owned()) as c_ulonglong;
+        let dw_lower = sspi_context_ptr.as_ptr().expose_provenance();
+        ph_new_context.dw_lower = try_execute!(dw_lower.try_into(), ErrorKind::InvalidHandle);
+
+        let dw_upper = into_raw_ptr(security_package_name.to_owned()).expose_provenance();
+        ph_new_context.dw_upper = {
+            try_execute!(dw_upper.try_into(), ErrorKind::InvalidHandle)
+        };
         // SAFETY: `pf_context_attr` is guaranteed to be non-null due to the prior check.
         unsafe {
             *pf_context_attr = f_context_req;
@@ -183,18 +190,6 @@ pub unsafe extern "system" fn AcceptSecurityContext(
         result.status.to_u32().unwrap()
     }
 }
-
-pub type AcceptSecurityContextFn = unsafe extern "system" fn(
-    PCredHandle,
-    PCtxtHandle,
-    PSecBufferDesc,
-    u32,
-    u32,
-    PCtxtHandle,
-    PSecBufferDesc,
-    *mut u32,
-    PTimeStamp,
-) -> SecurityStatus;
 
 /// The `CompleteAuthToken` function completes an authentication token.
 ///
@@ -240,7 +235,8 @@ pub unsafe extern "system" fn CompleteAuthToken(
         // SAFETY:
         // - `p_token` is guaranteed to be non-null due to the prior check.
         // - `p_token` points to a valid `SecBufferDesc` structure.
-        let c_buffers = unsafe { (*p_token).c_buffers } as usize;
+        let c_buffers = unsafe { (*p_token).c_buffers };
+        let c_buffers = try_execute!(c_buffers.try_into(), ErrorKind::InvalidParameter);
 
         // SAFETY:
         // - `p_buffers` is guaranteed to be non-null due to the prior check.
@@ -250,7 +246,8 @@ pub unsafe extern "system" fn CompleteAuthToken(
         // SAFETY:
         // - `raw_buffers` array contains valid `SecBuffer` structures.
         // - Each `SecBuffer` have a valid `pv_buffer` pointer that is valid for reads of `cb_buffer` bytes.
-        let mut buffers = unsafe { p_sec_buffers_to_security_buffers(raw_buffers) };
+        let buffers = unsafe { p_sec_buffers_to_security_buffers(raw_buffers) };
+        let mut buffers = try_execute!(buffers);
 
         sspi_context.complete_auth_token(&mut buffers).map_or_else(
             |err| err.error_type.to_u32().unwrap(),
@@ -258,8 +255,6 @@ pub unsafe extern "system" fn CompleteAuthToken(
         )
     }
 }
-
-pub type CompleteAuthTokenFn = unsafe extern "system" fn(PCtxtHandle, PSecBufferDesc) -> SecurityStatus;
 
 /// The `DeleteSecurityContext` function deletes the local data structures associated with the specified
 /// `security context` initiated by a previous call to the `InitializeSecurityContext` function or the
@@ -300,17 +295,18 @@ pub unsafe extern "system" fn DeleteSecurityContext(mut ph_context: PCtxtHandle)
         // - `ph_context` points to a valid `SecHandle` structure.
         let dw_upper = unsafe { (*ph_context).dw_upper };
         if dw_upper != 0 {
+            let addr = try_execute!(usize::try_from(dw_upper), ErrorKind::InvalidHandle);
+            let upper_ptr: *mut String = ptr::with_exposed_provenance_mut(addr);
+
             // SAFETY:
             // - `dw_upper` is guaranteed to be non-null due to the prior check.
             // - The value behind `dw_upper` pointer is allocated by an SSPI function.
-            let _name: Box<String> = unsafe { Box::from_raw(dw_upper as *mut String) };
+            let _name: Box<String> = unsafe { Box::from_raw(upper_ptr) };
         }
 
         0
     )
 }
-
-pub type DeleteSecurityContextFn = unsafe extern "system" fn(PCtxtHandle) -> SecurityStatus;
 
 #[instrument(skip_all)]
 #[cfg_attr(windows, rename_symbol(to = "Rust_ApplyControlToken"))]
@@ -319,8 +315,6 @@ pub extern "system" fn ApplyControlToken(_ph_context: PCtxtHandle, _p_input: PSe
     ErrorKind::UnsupportedFunction.to_u32().unwrap()
 }
 
-pub type ApplyControlTokenFn = extern "system" fn(PCtxtHandle, PSecBufferDesc) -> SecurityStatus;
-
 #[instrument(skip_all)]
 #[cfg_attr(windows, rename_symbol(to = "Rust_ImpersonateSecurityContext"))]
 #[unsafe(no_mangle)]
@@ -328,16 +322,12 @@ pub extern "system" fn ImpersonateSecurityContext(_ph_context: PCtxtHandle) -> S
     ErrorKind::UnsupportedFunction.to_u32().unwrap()
 }
 
-pub type ImpersonateSecurityContextFn = extern "system" fn(PCtxtHandle) -> SecurityStatus;
-
 #[instrument(skip_all)]
 #[cfg_attr(windows, rename_symbol(to = "Rust_RevertSecurityContext"))]
 #[unsafe(no_mangle)]
 pub extern "system" fn RevertSecurityContext(_ph_context: PCtxtHandle) -> SecurityStatus {
     ErrorKind::UnsupportedFunction.to_u32().unwrap()
 }
-
-pub type RevertSecurityContextFn = extern "system" fn(PCtxtHandle) -> SecurityStatus;
 
 #[instrument(skip_all)]
 #[cfg_attr(windows, rename_symbol(to = "Rust_MakeSignature"))]
@@ -351,8 +341,6 @@ pub extern "system" fn MakeSignature(
     ErrorKind::UnsupportedFunction.to_u32().unwrap()
 }
 
-pub type MakeSignatureFn = extern "system" fn(PCtxtHandle, u32, PSecBufferDesc, u32) -> SecurityStatus;
-
 #[instrument(skip_all)]
 #[cfg_attr(windows, rename_symbol(to = "Rust_VerifySignature"))]
 #[unsafe(no_mangle)]
@@ -364,8 +352,6 @@ pub extern "system" fn VerifySignature(
 ) -> SecurityStatus {
     ErrorKind::UnsupportedFunction.to_u32().unwrap()
 }
-
-pub type VerifySignatureFn = extern "system" fn(PCtxtHandle, PSecBufferDesc, u32, *mut u32) -> SecurityStatus;
 
 /// The `FreeContextBuffer` function enables callers of `security package` functions to free memory buffers
 /// allocated by the security package.
@@ -390,8 +376,6 @@ pub unsafe extern "system" fn FreeContextBuffer(pv_context_buffer: *mut c_void) 
     0
 }
 
-pub type FreeContextBufferFn = unsafe extern "system" fn(*mut c_void) -> SecurityStatus;
-
 #[instrument(skip_all)]
 #[cfg_attr(windows, rename_symbol(to = "Rust_ExportSecurityContext"))]
 #[unsafe(no_mangle)]
@@ -404,16 +388,12 @@ pub extern "system" fn ExportSecurityContext(
     ErrorKind::UnsupportedFunction.to_u32().unwrap()
 }
 
-pub type ExportSecurityContextFn = extern "system" fn(PCtxtHandle, u32, PSecBuffer, *mut *mut c_void) -> SecurityStatus;
-
 #[instrument(skip_all)]
 #[cfg_attr(windows, rename_symbol(to = "Rust_QuerySecurityContextToken"))]
 #[unsafe(no_mangle)]
 pub extern "system" fn QuerySecurityContextToken(_ph_context: PCtxtHandle, _token: *mut *mut c_void) -> SecurityStatus {
     ErrorKind::UnsupportedFunction.to_u32().unwrap()
 }
-
-pub type QuerySecurityContextTokenFn = extern "system" fn(PCtxtHandle, *mut *mut c_void) -> SecurityStatus;
 
 /// The `EncryptMessage` function encrypts a message to provide privacy.
 ///
@@ -461,7 +441,8 @@ pub unsafe extern "system" fn EncryptMessage(
         // SAFETY:
         // - `p_message` is guaranteed to be non-null due to the prior check.
         // - `p_message` points to a valid `SecBufferDesc` structure.
-        let len = unsafe { (*p_message).c_buffers as usize };
+        let c_buffers = unsafe { (*p_message).c_buffers };
+        let len = try_execute!(c_buffers.try_into(), ErrorKind::InvalidParameter);
 
         // SAFETY:
         // - `p_buffers` is guaranteed to be non-null due to the prior check.
@@ -496,8 +477,6 @@ pub unsafe extern "system" fn EncryptMessage(
         result.to_u32().unwrap()
     }
 }
-
-pub type EncryptMessageFn = unsafe extern "system" fn(PCtxtHandle, u32, PSecBufferDesc, u32) -> SecurityStatus;
 
 /// The `DecryptMessage` function decrypts a message.
 ///
@@ -548,7 +527,8 @@ pub unsafe extern "system" fn DecryptMessage(
         // SAFETY:
         // - `p_message` is guaranteed to be non-null due to the prior check.
         // - `p_message` points to a valid `SecBufferDesc` structure.
-        let len = unsafe { (*p_message).c_buffers as usize };
+        let c_buffers = unsafe { (*p_message).c_buffers };
+        let len = try_execute!(c_buffers.try_into(), ErrorKind::InvalidParameter);
 
         // SAFETY:
         // - `p_buffers` is guaranteed to be non-null due to the prior check.
@@ -591,8 +571,6 @@ pub unsafe extern "system" fn DecryptMessage(
     }
 }
 
-pub type DecryptMessageFn = unsafe extern "system" fn(PCtxtHandle, PSecBufferDesc, u32, *mut u32) -> SecurityStatus;
-
 /// Creates a vector of [SecurityBufferRef]s from the input C buffers.
 ///
 /// # Safety
@@ -620,7 +598,7 @@ unsafe fn p_sec_buffers_to_decrypt_buffers(raw_buffers: &[SecBuffer]) -> sspi::R
                 // SAFETY:
                 // - `raw_buffer.pv_buffer` is guaranteed to be non-null due to the prior check.
                 // - The memory region `raw_buffer.pv_buffer` points to is valid for reads of `raw_buffer.cb_buffer` bytes.
-                unsafe { from_raw_parts_mut(raw_buffer.pv_buffer as *mut u8, raw_buffer.cb_buffer.try_into()?) }
+                unsafe { from_raw_parts_mut(raw_buffer.pv_buffer.cast::<u8>(), raw_buffer.cb_buffer.try_into()?) }
             };
             buf.with_data(data)?
         })
@@ -678,7 +656,6 @@ mod tests {
     use std::ptr::null_mut;
     use std::slice::from_raw_parts;
 
-    use libc::c_ulonglong;
     use sspi::credssp::SspiContext;
     use sspi::{EncryptionFlags, Kerberos, SecurityBufferRef, Sspi};
 
@@ -690,9 +667,17 @@ mod tests {
         SecHandle {
             dw_lower: {
                 let sspi_context = SspiHandle::new(SspiContext::Kerberos(kerberos));
-                into_raw_ptr(sspi_context) as c_ulonglong
+                into_raw_ptr(sspi_context)
+                    .expose_provenance()
+                    .try_into()
+                    .expect("ptr address must fit into c_ulonglong")
             },
-            dw_upper: into_raw_ptr(sspi::kerberos::PACKAGE_INFO.name.to_string()) as c_ulonglong,
+            dw_upper: {
+                into_raw_ptr(sspi::kerberos::PACKAGE_INFO.name.to_string())
+                    .expose_provenance()
+                    .try_into()
+                    .expect("ptr address must fit into c_ulonglong")
+            },
         }
     }
 
@@ -758,7 +743,7 @@ mod tests {
         assert_eq!(
             unsafe {
                 from_raw_parts(
-                    buffers[1].pv_buffer as *const u8,
+                    buffers[1].pv_buffer.cast::<u8>(),
                     buffers[1].cb_buffer.try_into().unwrap(),
                 )
             },
@@ -806,10 +791,19 @@ mod tests {
 
         let mut kerberos_client_context = kerberos_sec_handle(kerberos_client);
 
-        let mut token =
-            unsafe { from_raw_parts(buffers[0].pv_buffer as *const u8, buffers[0].cb_buffer as usize) }.to_vec();
-        let mut data =
-            unsafe { from_raw_parts(buffers[1].pv_buffer as *const u8, buffers[1].cb_buffer as usize) }.to_vec();
+        let token_len = buffers[0]
+            .cb_buffer
+            .try_into()
+            .expect("token length must fit into usize");
+        let token_ptr = buffers[0].pv_buffer.cast::<u8>();
+        let mut token = unsafe { from_raw_parts(token_ptr, token_len) }.to_vec();
+
+        let data_len = buffers[1]
+            .cb_buffer
+            .try_into()
+            .expect("data length must fit into usize");
+        let data_ptr = buffers[1].pv_buffer.cast::<u8>();
+        let mut data = unsafe { from_raw_parts(data_ptr, data_len) }.to_vec();
         let mut buffers = [
             SecBuffer {
                 cb_buffer: token.len().try_into().unwrap(),
@@ -835,9 +829,11 @@ mod tests {
         assert_eq!(status, 0);
 
         // Check that the decrypted data is the same as the initial message
-        assert_eq!(
-            unsafe { from_raw_parts(buffers[1].pv_buffer as *const u8, buffers[1].cb_buffer as usize,) },
-            plain_message
-        );
+        let decrypted_len = buffers[1]
+            .cb_buffer
+            .try_into()
+            .expect("decrypted length must fit into usize");
+        let decrypted_ptr = buffers[1].pv_buffer.cast::<u8>();
+        assert_eq!(unsafe { from_raw_parts(decrypted_ptr, decrypted_len) }, plain_message);
     }
 }
