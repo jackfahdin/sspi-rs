@@ -741,7 +741,7 @@ dependencies = [
  "picky-asn1",
  "picky-asn1-der",
  "picky-asn1-x509",
- "picky-krb",
+ "picky-krb 0.12.5",
  "pkcs1",
  "rand 0.10.3",
  "rand_core 0.10.1",
@@ -1650,7 +1650,7 @@ dependencies = [
  "picky-asn1",
  "picky-asn1-der",
  "picky-asn1-x509",
- "picky-krb",
+ "picky-krb 0.12.5",
  "thiserror",
  "time",
  "tracing",
@@ -2085,6 +2085,34 @@ name = "picky-krb"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9306c2a07e8bfd1faa0985b76bc7b86ab98f2b9a1433fdfa4c9a116b6e4c8a3d"
+dependencies = [
+ "aes",
+ "block-padding",
+ "byteorder",
+ "cbc",
+ "cipher",
+ "crypto-bigint",
+ "des",
+ "hmac",
+ "inout",
+ "oid",
+ "pbkdf2",
+ "picky-asn1",
+ "picky-asn1-der",
+ "picky-asn1-x509",
+ "rand 0.10.3",
+ "rand_core 0.10.1",
+ "serde",
+ "sha1",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "picky-krb"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a272e7c4191fbb5ea7e0b34f47208804d47a6f748344351ba9229b0e5a604ed"
 dependencies = [
  "aes",
  "block-padding",
@@ -2987,7 +3015,7 @@ dependencies = [
  "picky-asn1",
  "picky-asn1-der",
  "picky-asn1-x509",
- "picky-krb",
+ "picky-krb 0.13.0",
  "pkcs1",
  "portpicker",
  "proptest",
